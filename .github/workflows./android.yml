@@ -1,0 +1,1240 @@
+name: Build Android App
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create all project files
+        run: |
+          pip install numpy
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.onelove.launcher"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.onelove.launcher"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              signingConfigs {
+                  create("release") {
+                      val ks = System.getenv("KEYSTORE_PATH")
+                      if (ks != null) {
+                          storeFile = file(ks)
+                          storePassword = System.getenv("KEYSTORE_PASSWORD")
+                          keyAlias = System.getenv("KEY_ALIAS")
+                          keyPassword = System.getenv("KEY_PASSWORD")
+                      }
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = true
+                      isShrinkResources = true
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                      if (System.getenv("KEYSTORE_PATH") != null) {
+                          signingConfig = signingConfigs.getByName("release")
+                      }
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              lint { checkReleaseBuilds = false }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.recyclerview:recyclerview:1.3.2")
+          }
+          EOF_FILE
+          mkdir -p app
+          cat > app/proguard-rules.pro <<'EOF_FILE'
+          # default rules are enough; app uses no reflection
+          EOF_FILE
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <!-- No <uses-permission> entries at all. The <queries> block is what lets
+                   a launcher list launchable apps without QUERY_ALL_PACKAGES. -->
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher_round"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.OneLove">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:clearTaskOnLaunch="true"
+                      android:stateNotNeeded="true"
+                      android:screenOrientation="portrait"
+                      android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p app/src/main/java/com/onelove/launcher
+          cat > app/src/main/java/com/onelove/launcher/AppAdapter.kt <<'EOF_FILE'
+          package com.onelove.launcher
+
+          import android.annotation.SuppressLint
+          import android.graphics.Color
+          import android.graphics.drawable.Drawable
+          import android.text.TextUtils
+          import android.view.Gravity
+          import android.view.ViewGroup
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import androidx.recyclerview.widget.RecyclerView
+
+          data class AppInfo(val label: String, val pkg: String, val cls: String, val icon: Drawable)
+
+          class AppAdapter(
+              private val onClick: (AppInfo) -> Unit,
+              private val onLong: (AppInfo) -> Unit
+          ) : RecyclerView.Adapter<AppAdapter.VH>() {
+
+              private var all: List<AppInfo> = emptyList()
+              private var shown: List<AppInfo> = emptyList()
+              private var query = ""
+
+              class VH(val root: LinearLayout, val icon: ImageView, val label: TextView) : RecyclerView.ViewHolder(root)
+
+              fun submit(list: List<AppInfo>) { all = list; applyFilter() }
+              fun filter(q: String) { query = q.trim().lowercase(); applyFilter() }
+              fun first(): AppInfo? = shown.firstOrNull()
+
+              @SuppressLint("NotifyDataSetChanged")
+              private fun applyFilter() {
+                  shown = if (query.isEmpty()) all else all.filter { it.label.lowercase().contains(query) }
+                  notifyDataSetChanged()
+              }
+
+              override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+                  val ctx = parent.context
+                  val root = LinearLayout(ctx).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER_HORIZONTAL
+                      setPadding(4.dp, 10.dp, 4.dp, 10.dp)
+                      layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                  }
+                  val icon = ImageView(ctx)
+                  root.addView(icon, LinearLayout.LayoutParams(56.dp, 56.dp))
+                  val label = TextView(ctx).apply {
+                      textSize = 11f
+                      setTextColor(Color.WHITE)
+                      maxLines = 1
+                      ellipsize = TextUtils.TruncateAt.END
+                      gravity = Gravity.CENTER
+                  }
+                  root.addView(label, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = 4.dp })
+                  return VH(root, icon, label)
+              }
+
+              override fun onBindViewHolder(h: VH, position: Int) {
+                  val app = shown[position]
+                  h.icon.setImageDrawable(app.icon)
+                  h.label.text = app.label
+                  h.root.setOnClickListener { onClick(app) }
+                  h.root.setOnLongClickListener { onLong(app); true }
+              }
+
+              override fun getItemCount() = shown.size
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java/com/onelove/launcher
+          cat > app/src/main/java/com/onelove/launcher/IncenseView.kt <<'EOF_FILE'
+          package com.onelove.launcher
+
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.graphics.RadialGradient
+          import android.graphics.RectF
+          import android.graphics.Shader
+          import android.os.SystemClock
+          import android.view.View
+          import kotlin.math.cos
+          import kotlin.math.sin
+          import kotlin.random.Random
+
+          /** A burning incense stick in a brass dish, with drifting smoke. Tap handling is done by the host. */
+          class IncenseView(context: Context) : View(context) {
+
+              private class Puff(
+                  var x: Float, var y: Float, val vx: Float, val vy: Float,
+                  val phase: Float, val life: Float, val size: Float, var age: Float = 0f
+              )
+
+              var lit = false
+                  private set
+
+              private var burn = 0f
+              private val puffs = ArrayList<Puff>()
+              private var last = 0L
+              private var emitAcc = 0f
+              private var tipX = 0f
+              private var tipY = 0f
+              private val tilt = Math.toRadians(10.0)
+
+              private val soft: Bitmap = makeSoft()
+              private val smokePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val stickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  strokeCap = Paint.Cap.ROUND; strokeWidth = dpf(3.5f); color = 0xFF8A5A2B.toInt()
+              }
+              private val ashStickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  strokeCap = Paint.Cap.ROUND; strokeWidth = dpf(3.5f); color = 0xFFA9A9A2.toInt()
+              }
+              private val dishPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFB98A2E.toInt() }
+              private val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = 0xFFF1CE74.toInt(); style = Paint.Style.STROKE; strokeWidth = dpf(2f)
+              }
+              private val sandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF3B2E1E.toInt() }
+              private val ashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF9A9A94.toInt() }
+              private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  shader = RadialGradient(
+                      0f, 0f, dpf(16f),
+                      intArrayOf(0xFFFFE9A0.toInt(), 0xCCFF7A12.toInt(), 0x00FF3D00),
+                      floatArrayOf(0f, .35f, 1f), Shader.TileMode.CLAMP
+                  )
+              }
+              private val corePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFFFF4C8.toInt() }
+              private val rect = RectF()
+
+              init { isClickable = true }
+
+              private fun makeSoft(): Bitmap {
+                  val bmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+                  val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                  p.shader = RadialGradient(
+                      32f, 32f, 32f,
+                      intArrayOf(0xFFFFFFFF.toInt(), 0x66FFFFFF, 0x00FFFFFF),
+                      floatArrayOf(0f, .5f, 1f), Shader.TileMode.CLAMP
+                  )
+                  Canvas(bmp).drawCircle(32f, 32f, 32f, p)
+                  return bmp
+              }
+
+              fun light() {
+                  if (burn >= 0.98f) burn = 0f
+                  lit = true
+                  last = 0L
+                  invalidate()
+              }
+
+              fun extinguish() {
+                  lit = false
+                  invalidate()
+              }
+
+              /** A thick burst of smoke (used on each cough). */
+              fun puff() {
+                  repeat(16) { emit(true) }
+                  invalidate()
+              }
+
+              private fun emit(big: Boolean) {
+                  if (puffs.size > 220) return
+                  val k = if (big) 1.4f else 1f
+                  puffs.add(
+                      Puff(
+                          tipX + (Random.nextFloat() - .5f) * dpf(4f), tipY,
+                          (Random.nextFloat() - .5f) * dpf(14f),
+                          -(dpf(30f) + Random.nextFloat() * dpf(25f)) * k,
+                          Random.nextFloat() * 6.28f,
+                          (if (big) 4f else 3f) + Random.nextFloat() * 1.5f,
+                          dpf(26f) + Random.nextFloat() * dpf(16f)
+                      )
+                  )
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  val now = SystemClock.uptimeMillis()
+                  val dt = if (last == 0L) 16L else minOf(now - last, 50L)
+                  last = now
+                  val s = dt / 1000f
+
+                  val cx = width / 2f
+                  val baseY = height - dpf(34f)
+                  val total = height * 0.55f
+
+                  if (lit) {
+                      burn += s / 90f
+                      if (burn >= 1f) { burn = 1f; lit = false }
+                  }
+                  val len = total * (1f - burn) + dpf(6f)
+                  val dx = sin(tilt).toFloat()
+                  val dy = -cos(tilt).toFloat()
+                  val sx = cx
+                  val sy = baseY - dpf(10f)
+                  tipX = sx + dx * len
+                  tipY = sy + dy * len
+
+                  // dish
+                  rect.set(cx - dpf(70f), baseY - dpf(6f), cx + dpf(70f), baseY + dpf(22f))
+                  canvas.drawOval(rect, dishPaint)
+                  canvas.drawOval(rect, rimPaint)
+                  rect.set(cx - dpf(58f), baseY - dpf(2f), cx + dpf(58f), baseY + dpf(14f))
+                  canvas.drawOval(rect, sandPaint)
+
+                  // ash heap
+                  val aw = dpf(10f) + burn * dpf(40f)
+                  val ah = dpf(3f) + burn * dpf(8f)
+                  rect.set(cx - aw, baseY + dpf(5f) - ah, cx + aw, baseY + dpf(5f) + ah)
+                  canvas.drawOval(rect, ashPaint)
+
+                  // stick (+ ash column above the ember)
+                  canvas.drawLine(sx, sy, tipX, tipY, stickPaint)
+                  if (lit) {
+                      canvas.drawLine(tipX, tipY, tipX + dx * dpf(12f), tipY + dy * dpf(12f), ashStickPaint)
+                  }
+
+                  // smoke
+                  if (lit) {
+                      emitAcc += s * 35f
+                      while (emitAcc >= 1f) { emitAcc -= 1f; emit(false) }
+                  }
+                  val it = puffs.iterator()
+                  while (it.hasNext()) {
+                      val p = it.next()
+                      p.age += s
+                      if (p.age >= p.life) { it.remove(); continue }
+                      val f = p.age / p.life
+                      p.x += p.vx * s
+                      p.y += p.vy * s
+                      val sway = sin(p.age * 2.2f + p.phase) * dpf(10f) * f
+                      val r = p.size * (0.25f + f)
+                      val fadeIn = if (f < 0.1f) f / 0.1f else 1f
+                      smokePaint.alpha = ((1f - f) * fadeIn * 110f).toInt()
+                      canvas.save()
+                      canvas.translate(p.x + sway, p.y)
+                      canvas.scale(r / 32f, r / 32f)
+                      canvas.drawBitmap(soft, -32f, -32f, smokePaint)
+                      canvas.restore()
+                  }
+
+                  // ember
+                  if (lit) {
+                      val pulse = 0.85f + 0.15f * sin(now / 120.0).toFloat()
+                      canvas.save()
+                      canvas.translate(tipX, tipY)
+                      canvas.scale(pulse, pulse)
+                      canvas.drawCircle(0f, 0f, dpf(16f), glowPaint)
+                      canvas.drawCircle(0f, 0f, dpf(2.2f), corePaint)
+                      canvas.restore()
+                  }
+
+                  if (lit || puffs.isNotEmpty()) postInvalidateOnAnimation()
+              }
+
+              override fun onWindowVisibilityChanged(visibility: Int) {
+                  super.onWindowVisibilityChanged(visibility)
+                  if (visibility == VISIBLE) {
+                      last = 0L
+                      postInvalidateOnAnimation()
+                  }
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java/com/onelove/launcher
+          cat > app/src/main/java/com/onelove/launcher/LeafRainView.kt <<'EOF_FILE'
+          package com.onelove.launcher
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.drawable.Drawable
+          import android.os.SystemClock
+          import android.view.View
+          import kotlin.math.sin
+          import kotlin.random.Random
+
+          /** Slowly drifting cannabis leaves in the background. */
+          class LeafRainView(context: Context) : View(context) {
+              private class Leaf(
+                  var x: Float, var y: Float, val size: Float, val speed: Float,
+                  var rot: Float, val spin: Float, val sway: Float, val phase: Float, val alpha: Int
+              )
+
+              private val drawable: Drawable = context.getDrawable(R.drawable.ic_leaf)!!
+              private val leaves = ArrayList<Leaf>()
+              private var last = 0L
+              private var t = 0f
+
+              override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+                  super.onSizeChanged(w, h, ow, oh)
+                  leaves.clear()
+                  repeat(12) { leaves.add(spawn(true)) }
+              }
+
+              private fun spawn(initial: Boolean): Leaf {
+                  val s = dpf(26f) + Random.nextFloat() * dpf(34f)
+                  return Leaf(
+                      Random.nextFloat() * width,
+                      if (initial) Random.nextFloat() * height else -s,
+                      s,
+                      dpf(18f) + Random.nextFloat() * dpf(30f),
+                      Random.nextFloat() * 360f,
+                      (Random.nextFloat() - .5f) * 40f,
+                      dpf(10f) + Random.nextFloat() * dpf(24f),
+                      Random.nextFloat() * 6.28f,
+                      40 + Random.nextInt(60)
+                  )
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  val now = SystemClock.uptimeMillis()
+                  val dt = if (last == 0L) 16L else minOf(now - last, 50L)
+                  last = now
+                  val s = dt / 1000f
+                  t += s
+                  for (i in leaves.indices) {
+                      var l = leaves[i]
+                      l.y += l.speed * s
+                      l.rot += l.spin * s
+                      if (l.y - l.size > height) {
+                          l = spawn(false)
+                          leaves[i] = l
+                      }
+                      val x = l.x + sin(t * 1.2f + l.phase) * l.sway
+                      val half = (l.size / 2).toInt()
+                      canvas.save()
+                      canvas.translate(x, l.y)
+                      canvas.rotate(l.rot)
+                      drawable.setBounds(-half, -half, half, half)
+                      drawable.alpha = l.alpha
+                      drawable.draw(canvas)
+                      canvas.restore()
+                  }
+                  postInvalidateOnAnimation()
+              }
+
+              override fun onWindowVisibilityChanged(visibility: Int) {
+                  super.onWindowVisibilityChanged(visibility)
+                  if (visibility == VISIBLE) {
+                      last = 0L
+                      postInvalidateOnAnimation()
+                  }
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java/com/onelove/launcher
+          cat > app/src/main/java/com/onelove/launcher/MainActivity.kt <<'EOF_FILE'
+          package com.onelove.launcher
+
+          import android.animation.ObjectAnimator
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.BroadcastReceiver
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.media.AudioAttributes
+          import android.media.SoundPool
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.text.Editable
+          import android.text.InputType
+          import android.text.TextWatcher
+          import android.view.Gravity
+          import android.view.GestureDetector
+          import android.view.HapticFeedbackConstants
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.animation.DecelerateInterpolator
+          import android.view.inputmethod.EditorInfo
+          import android.view.inputmethod.InputMethodManager
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextClock
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.core.content.ContextCompat
+          import androidx.core.view.ViewCompat
+          import androidx.core.view.WindowCompat
+          import androidx.core.view.WindowInsetsCompat
+          import androidx.recyclerview.widget.GridLayoutManager
+          import androidx.recyclerview.widget.RecyclerView
+          import java.util.Calendar
+          import java.util.concurrent.Executors
+
+          private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+          private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+
+          private val QUOTES = listOf(
+              "One love starts with one calm breath.",
+              "Slow burn, steady mind.",
+              "Roots deep, spirit high.",
+              "Good vibes grow where you plant them.",
+              "Be like incense: leave something good in the air.",
+              "Small steps, good rhythm.",
+              "Peace is a daily practice.",
+              "Walk easy, think positive."
+          )
+
+          class MainActivity : Activity() {
+
+              private lateinit var prefs: Prefs
+              private lateinit var bg: BgView
+              private lateinit var leaves: LeafRainView
+              private lateinit var home: LinearLayout
+              private lateinit var incense: IncenseView
+              private lateinit var status: TextView
+              private lateinit var dock: LinearLayout
+              private lateinit var drawer: LinearLayout
+              private lateinit var search: EditText
+              private lateinit var grid: RecyclerView
+              private lateinit var adapter: AppAdapter
+              private lateinit var sounds: SoundPool
+              private lateinit var gestures: GestureDetector
+
+              private val coughIds = IntArray(2)
+              private val ui = Handler(Looper.getMainLooper())
+              private val io = Executors.newSingleThreadExecutor()
+              private var allApps = listOf<AppInfo>()
+              private var drawerOpen = false
+
+              private val cough1 = Runnable { cough(0, false) }
+              private val cough2 = Runnable { cough(1, true) }
+
+              private val pkgReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) { loadApps() }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  prefs = Prefs(this)
+                  WindowCompat.setDecorFitsSystemWindows(window, false)
+                  setContentView(buildUi())
+                  applyTheme()
+                  setupSound()
+                  setupGestures()
+                  loadApps()
+
+                  val f = IntentFilter().apply {
+                      addAction(Intent.ACTION_PACKAGE_ADDED)
+                      addAction(Intent.ACTION_PACKAGE_REMOVED)
+                      addAction(Intent.ACTION_PACKAGE_CHANGED)
+                      addDataScheme("package")
+                  }
+                  ContextCompat.registerReceiver(this, pkgReceiver, f, ContextCompat.RECEIVER_NOT_EXPORTED)
+              }
+
+              // ---------------------------------------------------------------- UI
+
+              private fun roundBg(color: Int, radiusDp: Int, stroke: Int? = null) = GradientDrawable().apply {
+                  setColor(color)
+                  cornerRadius = dpf(radiusDp.toFloat())
+                  if (stroke != null) setStroke(1.dp, stroke)
+              }
+
+              private fun buildUi(): FrameLayout {
+                  val root = FrameLayout(this)
+
+                  bg = BgView(this)
+                  root.addView(bg, FrameLayout.LayoutParams(MATCH, MATCH))
+
+                  leaves = LeafRainView(this).apply { visibility = if (prefs.leaves) View.VISIBLE else View.GONE }
+                  root.addView(leaves, FrameLayout.LayoutParams(MATCH, MATCH))
+
+                  // ----- home layer
+                  home = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER_HORIZONTAL
+                      isLongClickable = true
+                      setOnLongClickListener { showMenu(); true }
+                  }
+                  val clock = TextClock(this).apply {
+                      format12Hour = "h:mm"; format24Hour = "HH:mm"
+                      textSize = 72f
+                      setTextColor(Color.WHITE)
+                      typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+                      setShadowLayer(10f, 0f, 3f, 0x99000000.toInt())
+                  }
+                  home.addView(clock, LinearLayout.LayoutParams(WRAP, WRAP))
+
+                  val date = TextClock(this).apply {
+                      format12Hour = "EEEE, d MMMM"; format24Hour = "EEEE, d MMMM"
+                      textSize = 16f
+                      setTextColor(Color.WHITE)
+                      setShadowLayer(8f, 0f, 2f, 0x99000000.toInt())
+                  }
+                  home.addView(date, LinearLayout.LayoutParams(WRAP, WRAP))
+
+                  val quote = TextView(this).apply {
+                      text = "\u201C" + QUOTES[Calendar.getInstance().get(Calendar.DAY_OF_YEAR) % QUOTES.size] + "\u201D"
+                      textSize = 14f
+                      setTypeface(typeface, Typeface.ITALIC)
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                      alpha = .9f
+                      setShadowLayer(8f, 0f, 2f, 0x99000000.toInt())
+                  }
+                  home.addView(quote, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(32.dp, 14.dp, 32.dp, 0) })
+
+                  incense = IncenseView(this).apply { minimumHeight = 160.dp }
+                  incense.setOnClickListener { toggleIncense() }
+                  home.addView(incense, LinearLayout.LayoutParams(MATCH, 0, 1f).apply { topMargin = 8.dp })
+
+                  status = TextView(this).apply {
+                      text = "Tap the incense to light it"
+                      textSize = 14f
+                      gravity = Gravity.CENTER
+                      setShadowLayer(8f, 0f, 2f, 0x99000000.toInt())
+                  }
+                  home.addView(status, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(16.dp, 4.dp, 16.dp, 12.dp) })
+
+                  dock = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER
+                      setPadding(10.dp, 10.dp, 10.dp, 10.dp)
+                  }
+                  home.addView(dock, LinearLayout.LayoutParams(MATCH, 84.dp).apply { setMargins(24.dp, 0, 24.dp, 0) })
+
+                  val swipeHint = TextView(this).apply {
+                      text = "\u25B2 swipe up for apps  \u2022  long-press for settings"
+                      textSize = 11f
+                      setTextColor(0xCCFFFFFF.toInt())
+                      gravity = Gravity.CENTER
+                  }
+                  home.addView(swipeHint, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = 8.dp })
+                  root.addView(home, FrameLayout.LayoutParams(MATCH, MATCH))
+
+                  // ----- drawer layer
+                  drawer = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(0xF2071209.toInt())
+                      visibility = View.GONE
+                      isClickable = true
+                  }
+                  val closeBtn = TextView(this).apply {
+                      text = "\u25BE"
+                      textSize = 24f
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                      setOnClickListener { closeDrawer() }
+                  }
+                  drawer.addView(closeBtn, LinearLayout.LayoutParams(MATCH, 40.dp))
+
+                  search = EditText(this).apply {
+                      hint = "Search apps\u2026"
+                      setHintTextColor(0x99FFFFFF.toInt())
+                      setTextColor(Color.WHITE)
+                      textSize = 16f
+                      inputType = InputType.TYPE_CLASS_TEXT
+                      maxLines = 1
+                      imeOptions = EditorInfo.IME_ACTION_GO
+                      background = roundBg(0x26FFFFFF, 24)
+                      setPadding(20.dp, 12.dp, 20.dp, 12.dp)
+                      addTextChangedListener(object : TextWatcher {
+                          override fun afterTextChanged(s: Editable?) { adapter.filter(s?.toString() ?: "") }
+                          override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                          override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      })
+                      setOnEditorActionListener { _, id, _ ->
+                          if (id == EditorInfo.IME_ACTION_GO) {
+                              adapter.first()?.let { launch(it); closeDrawer() }
+                              true
+                          } else false
+                      }
+                  }
+                  drawer.addView(search, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(8.dp, 0, 8.dp, 8.dp) })
+
+                  adapter = AppAdapter(
+                      onClick = { launch(it); closeDrawer() },
+                      onLong = { appMenu(it) }
+                  )
+                  grid = RecyclerView(this).apply {
+                      layoutManager = GridLayoutManager(this@MainActivity, 4)
+                      adapter = this@MainActivity.adapter
+                      clipToPadding = false
+                  }
+                  drawer.addView(grid, LinearLayout.LayoutParams(MATCH, 0, 1f))
+                  root.addView(drawer, FrameLayout.LayoutParams(MATCH, MATCH))
+
+                  ViewCompat.setOnApplyWindowInsetsListener(root) { _, ins ->
+                      val bars = ins.getInsets(WindowInsetsCompat.Type.systemBars())
+                      val withIme = ins.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
+                      home.setPadding(0, bars.top + 16.dp, 0, bars.bottom + 8.dp)
+                      drawer.setPadding(12.dp, withIme.top + 4.dp, 12.dp, withIme.bottom + 8.dp)
+                      ins
+                  }
+                  return root
+              }
+
+              private fun applyTheme() {
+                  val p = PALETTES[prefs.theme % PALETTES.size]
+                  bg.palette = p
+                  status.setTextColor(p.accent)
+                  dock.background = roundBg(0x40000000, 28, p.accent)
+              }
+
+              // ---------------------------------------------------------------- gestures
+
+              private fun setupGestures() {
+                  gestures = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+                      override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
+                          if (e1 == null) return false
+                          val dy = e2.y - e1.y
+                          if (!drawerOpen && -dy > 80.dp && vy < -800f) { openDrawer(); return true }
+                          if (drawerOpen && dy > 80.dp && vy > 800f && !grid.canScrollVertically(-1)) {
+                              closeDrawer(); return true
+                          }
+                          return false
+                      }
+                  })
+              }
+
+              override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+                  if (::gestures.isInitialized) gestures.onTouchEvent(ev)
+                  return super.dispatchTouchEvent(ev)
+              }
+
+              @Suppress("DEPRECATION")
+              override fun onBackPressed() {
+                  if (drawerOpen) closeDrawer()
+              }
+
+              override fun onNewIntent(intent: Intent?) {
+                  super.onNewIntent(intent)
+                  if (drawerOpen) closeDrawer()
+              }
+
+              private fun openDrawer() {
+                  drawerOpen = true
+                  drawer.animate().cancel()
+                  drawer.visibility = View.VISIBLE
+                  drawer.translationY = resources.displayMetrics.heightPixels.toFloat()
+                  drawer.animate().translationY(0f).setDuration(260).setInterpolator(DecelerateInterpolator()).start()
+              }
+
+              private fun closeDrawer() {
+                  if (!drawerOpen) return
+                  drawerOpen = false
+                  (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(search.windowToken, 0)
+                  search.setText("")
+                  search.clearFocus()
+                  drawer.animate().cancel()
+                  drawer.animate().translationY(resources.displayMetrics.heightPixels.toFloat())
+                      .setDuration(220).withEndAction { if (!drawerOpen) drawer.visibility = View.GONE }.start()
+              }
+
+              // ---------------------------------------------------------------- apps
+
+              private fun loadApps() {
+                  io.execute {
+                      val pm = packageManager
+                      val q = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                      val list = pm.queryIntentActivities(q, 0)
+                          .filter { it.activityInfo.packageName != packageName }
+                          .map {
+                              AppInfo(
+                                  it.loadLabel(pm).toString(),
+                                  it.activityInfo.packageName,
+                                  it.activityInfo.name,
+                                  it.loadIcon(pm)
+                              )
+                          }
+                          .sortedBy { it.label.lowercase() }
+                      runOnUiThread {
+                          allApps = list
+                          refreshLists()
+                      }
+                  }
+              }
+
+              private fun refreshLists() {
+                  val hidden = prefs.hidden
+                  val visible = allApps.filter { it.pkg !in hidden }
+                  adapter.submit(visible)
+                  rebuildDock(visible)
+              }
+
+              private fun rebuildDock(visible: List<AppInfo>) {
+                  dock.removeAllViews()
+                  val items = prefs.dock.mapNotNull { pkg -> visible.firstOrNull { it.pkg == pkg } }.take(5)
+                  if (items.isEmpty()) {
+                      dock.addView(TextView(this).apply {
+                          text = "Long-press any app to pin it here"
+                          textSize = 12f
+                          setTextColor(0xCCFFFFFF.toInt())
+                      })
+                      return
+                  }
+                  for (app in items) {
+                      dock.addView(ImageView(this).apply {
+                          setImageDrawable(app.icon)
+                          layoutParams = LinearLayout.LayoutParams(56.dp, 56.dp).apply { setMargins(6.dp, 0, 6.dp, 0) }
+                          setOnClickListener { launch(app) }
+                          setOnLongClickListener { appMenu(app); true }
+                      })
+                  }
+              }
+
+              private fun launch(app: AppInfo) {
+                  val i = Intent(Intent.ACTION_MAIN)
+                      .addCategory(Intent.CATEGORY_LAUNCHER)
+                      .setComponent(ComponentName(app.pkg, app.cls))
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                  try { startActivity(i) } catch (e: Exception) {
+                      Toast.makeText(this, "Can't open ${app.label}", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              private fun appMenu(app: AppInfo) {
+                  val pinned = app.pkg in prefs.dock
+                  val opts = arrayOf(if (pinned) "Remove from dock" else "Pin to dock", "Hide app", "App info / uninstall")
+                  AlertDialog.Builder(this).setTitle(app.label).setItems(opts) { _, which ->
+                      when (which) {
+                          0 -> {
+                              val d = prefs.dock
+                              if (pinned) prefs.dock = d - app.pkg
+                              else if (d.size >= 5) Toast.makeText(this, "Dock is full (5 apps)", Toast.LENGTH_SHORT).show()
+                              else prefs.dock = d + app.pkg
+                              refreshLists()
+                          }
+                          1 -> {
+                              prefs.hidden = prefs.hidden + app.pkg
+                              prefs.dock = prefs.dock - app.pkg
+                              refreshLists()
+                              Toast.makeText(this, "Hidden. Restore it from the home-screen menu.", Toast.LENGTH_LONG).show()
+                          }
+                          2 -> try {
+                              startActivity(
+                                  Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${app.pkg}"))
+                                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                              )
+                          } catch (e: Exception) { }
+                      }
+                  }.show()
+              }
+
+              // ---------------------------------------------------------------- menu
+
+              private fun showMenu() {
+                  val p = PALETTES[prefs.theme % PALETTES.size]
+                  val items = arrayOf(
+                      "Theme: ${p.name} (tap to change)",
+                      "Falling leaves: ${if (prefs.leaves) "ON" else "OFF"}",
+                      "Hidden apps (${prefs.hidden.size})",
+                      "Set as default home app",
+                      "About"
+                  )
+                  AlertDialog.Builder(this).setTitle("One Love Launcher").setItems(items) { _, which ->
+                      when (which) {
+                          0 -> { prefs.theme = (prefs.theme + 1) % PALETTES.size; applyTheme() }
+                          1 -> {
+                              prefs.leaves = !prefs.leaves
+                              leaves.visibility = if (prefs.leaves) View.VISIBLE else View.GONE
+                          }
+                          2 -> showHidden()
+                          3 -> try { startActivity(Intent(Settings.ACTION_HOME_SETTINGS)) } catch (e: Exception) { }
+                          4 -> AlertDialog.Builder(this).setTitle("One Love Launcher")
+                              .setMessage("Version 1.0\nNo ads. No tracking. No permissions.\nSwipe up for apps, long-press for settings.")
+                              .setPositiveButton("OK", null).show()
+                      }
+                  }.show()
+              }
+
+              private fun showHidden() {
+                  val hiddenApps = allApps.filter { it.pkg in prefs.hidden }
+                  if (hiddenApps.isEmpty()) {
+                      Toast.makeText(this, "No hidden apps", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  AlertDialog.Builder(this).setTitle("Tap an app to unhide")
+                      .setItems(hiddenApps.map { it.label }.toTypedArray()) { _, w ->
+                          prefs.hidden = prefs.hidden - hiddenApps[w].pkg
+                          refreshLists()
+                      }.show()
+              }
+
+              // ---------------------------------------------------------------- incense + coughs
+
+              private fun setupSound() {
+                  sounds = SoundPool.Builder()
+                      .setMaxStreams(2)
+                      .setAudioAttributes(
+                          AudioAttributes.Builder()
+                              .setUsage(AudioAttributes.USAGE_MEDIA)
+                              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                              .build()
+                      ).build()
+                  coughIds[0] = sounds.load(this, R.raw.cough1, 1)
+                  coughIds[1] = sounds.load(this, R.raw.cough2, 1)
+              }
+
+              private fun toggleIncense() {
+                  if (incense.lit) {
+                      incense.extinguish()
+                      ui.removeCallbacks(cough1)
+                      ui.removeCallbacks(cough2)
+                      status.text = "Incense put out. Peace."
+                  } else {
+                      incense.light()
+                      status.text = "Burning\u2026 breathe slowly"
+                      ui.postDelayed(cough1, 2500)
+                      ui.postDelayed(cough2, 3800)
+                  }
+              }
+
+              private fun cough(index: Int, last: Boolean) {
+                  if (!incense.lit) return
+                  sounds.play(coughIds[index], 1f, 1f, 1, 0, 1f)
+                  incense.puff()
+                  incense.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                  ObjectAnimator.ofFloat(home, "translationX", 0f, -14f, 14f, -10f, 10f, -5f, 0f)
+                      .setDuration(380).start()
+                  status.text = if (last) "*cough* *cough* \u2014 strong incense!" else "*cough*"
+                  if (last) ui.postDelayed({
+                      if (incense.lit) status.text = "Burning\u2026 tap to put it out"
+                  }, 3000)
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  ui.removeCallbacksAndMessages(null)
+                  sounds.release()
+                  io.shutdown()
+                  try { unregisterReceiver(pkgReceiver) } catch (e: Exception) { }
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java/com/onelove/launcher
+          cat > app/src/main/java/com/onelove/launcher/Prefs.kt <<'EOF_FILE'
+          package com.onelove.launcher
+
+          import android.content.Context
+
+          class Prefs(ctx: Context) {
+              private val sp = ctx.getSharedPreferences("onelove", Context.MODE_PRIVATE)
+
+              var theme: Int
+                  get() = sp.getInt("theme", 0)
+                  set(v) { sp.edit().putInt("theme", v).apply() }
+
+              var leaves: Boolean
+                  get() = sp.getBoolean("leaves", true)
+                  set(v) { sp.edit().putBoolean("leaves", v).apply() }
+
+              var dock: List<String>
+                  get() = (sp.getString("dock", "") ?: "").split("|").filter { it.isNotEmpty() }
+                  set(v) { sp.edit().putString("dock", v.joinToString("|")).apply() }
+
+              var hidden: Set<String>
+                  get() = (sp.getStringSet("hidden", emptySet()) ?: emptySet()).toSet()
+                  set(v) { sp.edit().putStringSet("hidden", v.toSet()).apply() }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java/com/onelove/launcher
+          cat > app/src/main/java/com/onelove/launcher/Theme.kt <<'EOF_FILE'
+          package com.onelove.launcher
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.LinearGradient
+          import android.graphics.Paint
+          import android.graphics.Shader
+          import android.view.View
+
+          class RastaPalette(
+              val name: String,
+              val colors: IntArray,
+              val stops: FloatArray,
+              val scrim: Int,
+              val accent: Int
+          )
+
+          private fun c(v: Long) = v.toInt()
+
+          val PALETTES = listOf(
+              RastaPalette(
+                  "Roots Classic",
+                  intArrayOf(c(0xFFC1272D), c(0xFFC1272D), c(0xFFF2B705), c(0xFFF2B705), c(0xFF1E8E3E), c(0xFF1E8E3E)),
+                  floatArrayOf(0f, .333f, .333f, .667f, .667f, 1f),
+                  c(0xA6000000), c(0xFFF2B705)
+              ),
+              RastaPalette(
+                  "Deep Forest",
+                  intArrayOf(c(0xFF14532D), c(0xFF031009)),
+                  floatArrayOf(0f, 1f),
+                  c(0x33000000), c(0xFF7BD35B)
+              ),
+              RastaPalette(
+                  "Golden Hour",
+                  intArrayOf(c(0xFFF2B705), c(0xFFB3472B), c(0xFF2A0F0A)),
+                  floatArrayOf(0f, .5f, 1f),
+                  c(0x40000000), c(0xFFFFD45C)
+              )
+          )
+
+          class BgView(context: Context) : View(context) {
+              private val paint = Paint()
+              private val scrimPaint = Paint()
+
+              var palette: RastaPalette = PALETTES[0]
+                  set(value) {
+                      field = value
+                      rebuild()
+                      invalidate()
+                  }
+
+              init { rebuild() }
+
+              override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+                  super.onSizeChanged(w, h, ow, oh)
+                  rebuild()
+              }
+
+              private fun rebuild() {
+                  scrimPaint.color = palette.scrim
+                  if (height > 0) {
+                      paint.shader = LinearGradient(
+                          0f, 0f, 0f, height.toFloat(), palette.colors, palette.stops, Shader.TileMode.CLAMP
+                      )
+                  }
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+                  canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), scrimPaint)
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java/com/onelove/launcher
+          cat > app/src/main/java/com/onelove/launcher/Utils.kt <<'EOF_FILE'
+          package com.onelove.launcher
+
+          import android.content.res.Resources
+
+          val Int.dp: Int get() = (this * Resources.getSystem().displayMetrics.density).toInt()
+          fun dpf(v: Float): Float = v * Resources.getSystem().displayMetrics.density
+          EOF_FILE
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_launcher_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+              <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          EOF_FILE
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_launcher_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+              <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          EOF_FILE
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml <<'EOF_FILE'
+          <resources>
+              <string name="app_name">One Love Launcher</string>
+          </resources>
+          EOF_FILE
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/themes.xml <<'EOF_FILE'
+          <resources>
+              <style name="Theme.OneLove" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">@android:color/black</item>
+                  <item name="android:statusBarColor">@android:color/transparent</item>
+                  <item name="android:navigationBarColor">@android:color/transparent</item>
+              </style>
+          </resources>
+          EOF_FILE
+          mkdir -p .
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          mkdir -p .
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          EOF_FILE
+          mkdir -p .
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "OneLoveLauncher"
+          include(":app")
+          EOF_FILE
+          mkdir -p app/src/main/res/drawable app/src/main/res/raw
+          cat > gen.py <<'EOF_FILE'
+          import math, wave, numpy as np
+          R = "app/src/main/res/"
+
+          # ---------------- leaf vector ----------------
+          def prof(t): return (t ** 0.6) * ((1 - t) ** 0.95)
+          MX = max(prof(i / 300) for i in range(1, 300))
+          CX, CY = 50.0, 66.0
+
+          def leaflet(ang, L, W, teeth):
+              a = math.radians(ang)
+              def tr(u, v):
+                  return (CX + u * math.cos(a) + v * math.sin(a), CY + u * math.sin(a) - v * math.cos(a))
+              N = teeth * 8
+              left, right = [], []
+              for i in range(N + 1):
+                  t = i / N
+                  w = W * prof(t) / MX
+                  frac = (t * teeth) % 1.0 if 0 < t < 1 else 0
+                  w *= 0.78 + 0.22 * frac
+                  left.append(tr(-w, t * L)); right.append(tr(w, t * L))
+              veins = []
+              for k in range(1, 8):
+                  t = 0.1 + k * 0.1
+                  t2 = min(t + 0.13, 0.97)
+                  w2 = 0.85 * W * prof(t2) / MX
+                  m = tr(0, t * L)
+                  for sgn in (-1, 1):
+                      e = tr(sgn * w2, t2 * L)
+                      veins.append(f"M{m[0]:.1f},{m[1]:.1f}L{e[0]:.1f},{e[1]:.1f}")
+              return left, right, tr(0, 0), tr(0, L), "".join(veins)
+
+          def poly(pts): return "M" + "L".join(f"{x:.1f},{y:.1f}" for x, y in pts) + "Z"
+          def cx_of(pts): return sum(p[0] for p in pts) / len(pts)
+
+          def grad(d, base, tip, c0, c1, stroke="#0E3A12"):
+              return (f'<path android:pathData="{d}" android:strokeColor="{stroke}" android:strokeWidth="0.4" android:strokeLineJoin="round">'
+                      f'<aapt:attr name="android:fillColor"><gradient android:type="linear" android:startX="{base[0]:.1f}" android:startY="{base[1]:.1f}" '
+                      f'android:endX="{tip[0]:.1f}" android:endY="{tip[1]:.1f}"><item android:offset="0" android:color="{c0[0]}"/>'
+                      f'<item android:offset="1" android:color="{c0[1]}"/></gradient></aapt:attr></path>')
+
+          specs = [(95, 22, 3.8, 7), (57, 33, 5.2, 9), (28, 40, 6.2, 10), (0, 46, 7.0, 11)]
+          LIGHT = ("#86CF47", "#2F7D22"); DARK = ("#4E9A2C", "#17561C")
+          body = ['<path android:pathData="M50,66C50,76 51,84 50,93" android:strokeColor="#5C8A2E" android:strokeWidth="1.8" android:strokeLineCap="round"/>']
+          for ang, L, W, teeth in specs:
+              for s in ([1] if ang == 0 else [-1, 1]):
+                  l, r, base, tip, veins = leaflet(s * ang, L, W, teeth)
+                  light_left = cx_of(l) <= cx_of(r)
+                  body.append(grad(poly(l), base, tip, LIGHT if light_left else DARK, None))
+                  body.append(grad(poly(r), base, tip, DARK if light_left else LIGHT, None))
+                  body.append(f'<path android:pathData="M{base[0]:.1f},{base[1]:.1f}L{tip[0]:.1f},{tip[1]:.1f}" android:strokeColor="#C9EE8E" android:strokeWidth="0.8" android:strokeLineCap="round"/>')
+                  body.append(f'<path android:pathData="{veins}" android:strokeColor="#1B5A1A" android:strokeAlpha="0.55" android:strokeWidth="0.3"/>')
+          body = "\n    ".join(body)
+          HDR = '<?xml version="1.0" encoding="utf-8"?>\n'
+          open(R + "drawable/ic_leaf.xml", "w").write(HDR +
+           '<vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt"\n'
+           '    android:width="100dp" android:height="100dp" android:viewportWidth="100" android:viewportHeight="100">\n    ' + body + '\n</vector>\n')
+          open(R + "drawable/ic_launcher_foreground.xml", "w").write(HDR +
+           '<vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt"\n'
+           '    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">\n'
+           '    <group android:translateX="4" android:translateY="-4">\n    ' + body + '\n    </group>\n</vector>\n')
+          open(R + "drawable/ic_launcher_background.xml", "w").write(HDR +
+           '<vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt"\n'
+           '    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">\n'
+           '    <path android:fillColor="#C1272D" android:pathData="M0,0h108v36h-108z"/>\n'
+           '    <path android:fillColor="#F2B705" android:pathData="M0,36h108v36h-108z"/>\n'
+           '    <path android:fillColor="#1E8E3E" android:pathData="M0,72h108v36h-108z"/>\n'
+           '    <path android:pathData="M0,0h108v108h-108z"><aapt:attr name="android:fillColor"><gradient android:type="radial" '
+           'android:centerX="54" android:centerY="54" android:gradientRadius="80"><item android:offset="0" android:color="#00000000"/>'
+           '<item android:offset="1" android:color="#88000000"/></gradient></aapt:attr></path>\n</vector>\n')
+
+          # ---------------- cough audio ----------------
+          sr = 22050
+          def bandnoise(n, lo, hi, rng):
+              X = np.fft.rfft(rng.standard_normal(n)); f = np.fft.rfftfreq(n, 1 / sr)
+              X *= ((f > lo) & (f < hi)); return np.fft.irfft(X, n)
+          def cough(f0, seed, dur):
+              rng = np.random.default_rng(seed); n = int(sr * dur); t = np.arange(n) / sr
+              burst = bandnoise(n, 400, 4500, rng) * np.where(t < .004, t / .004, np.exp(-(t - .004) / .04))
+              t0 = .045; tv = np.clip(t - t0, 0, None)
+              f = f0 * (1 - .25 * np.clip(tv / .3, 0, 1)); ph = 2 * np.pi * np.cumsum(f) / sr
+              v = np.zeros(n)
+              for k in range(1, 40):
+                  fk = k * f0
+                  w = np.exp(-((fk - 750) / 260) ** 2) + .7 * np.exp(-((fk - 1300) / 350) ** 2) + .3 * np.exp(-((fk - 2500) / 500) ** 2) + .05
+                  v += w / k ** .6 * np.sin(k * ph)
+              env = np.where(t < t0, 0, np.minimum(tv / .01, 1) * np.exp(-tv / .11))
+              v *= env * (1 + .35 * np.sin(2 * np.pi * 65 * t))
+              asp = bandnoise(n, 600, 3500, rng) * env
+              pk = lambda x: x / (np.abs(x).max() + 1e-9)
+              sig = .8 * pk(burst) + .7 * pk(v) + .35 * pk(asp)
+              sig *= np.minimum(1, (n - np.arange(n)) / (sr * .02))
+              return (pk(sig) * .9 * 32767).astype(np.int16)
+          for name, f0, seed, dur in (("cough1", 150, 3, .55), ("cough2", 128, 11, .7)):
+              w = wave.open(R + f"raw/{name}.wav", "wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+              w.writeframes(cough(f0, seed, dur).tobytes()); w.close()
+          print("generated")
+          EOF_FILE
+          python3 gen.py
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: app/build/outputs/apk/debug/*.apk
